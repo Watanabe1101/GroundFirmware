@@ -19,8 +19,11 @@ HardwareSerial mySerial(1);
 void enterConfigurationMode();
 void exitConfigurationMode();
 uint8_t calculateChecksum(const uint8_t *data, size_t length);
-void sendLoRaCommand(const uint8_t *command, size_t len);
+void sendCommand(const uint8_t *command, size_t len);
 void configureLoRaModule();
+void Addaddressandchannel();
+void printHexData(const uint8_t *data, size_t length);
+void decodeGPSData(const char *gpsString);
 
 //-----------------------------------------
 // LoRaモジュール設定用関数群
@@ -56,7 +59,7 @@ void sendCommand(const uint8_t *command, size_t len)
   Serial.print("Send Command: ");
   for (size_t i = 0; i < len; i++)
   {
-    Serial.printf("0x%02X ", command[i]);
+    Serial.printf("%02X ", command[i]);
   }
   Serial.println();
 }
@@ -97,16 +100,22 @@ void configureLoRaModule()
 
   // 応答を出力
   Serial.print("Response: ");
-  for (size_t i = 0; i < responseIndex; i++)
-  {
-    Serial.printf("0x%02X ", response[i]);
-  }
-  Serial.println();
+  printHexData(response, responseIndex);
 
   // 動作モードに戻る
   exitConfigurationMode();
 
   Serial.println("LoRa module setup finished! Start Operation Mode.");
+}
+
+// 16進数でデータを表示するヘルパー関数
+void printHexData(const uint8_t *data, size_t length)
+{
+  for (size_t i = 0; i < length; i++)
+  {
+    Serial.printf("%02X ", data[i]);
+  }
+  Serial.println();
 }
 
 void Addaddressandchannel()
@@ -119,10 +128,47 @@ void Addaddressandchannel()
   mySerial.write(channel);
 }
 
+// ASCII形式のGPSデータを解析する関数
+void decodeGPSData(const char *gpsString)
+{
+  // GPS文字列から緯度と経度を抽出（形式: "latitude,longitude"）
+  double latitude = 0.0, longitude = 0.0;
+  int parsed = sscanf(gpsString, "%lf,%lf", &latitude, &longitude);
+
+  if (parsed == 2)
+  {
+    // 正常にパースできた場合
+
+    // デコードした値を標準形式で表示
+    Serial.print("GPS Data: Lat=");
+    Serial.print(latitude, 6); // 小数点以下6桁まで表示
+    Serial.print(", Lon=");
+    Serial.println(longitude, 6);
+
+    // 度分秒形式でも表示
+    int latDeg = (int)latitude;
+    double latMin = (latitude - latDeg) * 60.0;
+    int latMinInt = (int)latMin;
+    double latSec = (latMin - latMinInt) * 60.0;
+
+    int lonDeg = (int)longitude;
+    double lonMin = (longitude - lonDeg) * 60.0;
+    int lonMinInt = (int)lonMin;
+    double lonSec = (lonMin - lonMinInt) * 60.0;
+
+    Serial.printf("Latitude: %d° %d' %.2f\", Longitude: %d° %d' %.2f\"\n",
+                  latDeg, latMinInt, latSec, lonDeg, lonMinInt, lonSec);
+  }
+  else
+  {
+    Serial.println("Error decoding GPS data. Invalid format.");
+  }
+}
+
 void setup()
 {
-  Serial.begin(9600);
-  Serial.println("Ground Station Starting...");
+  Serial.begin(115200); // 高速なシリアル通信
+  Serial.println("ASCII GPS Receiver Station Starting...");
 
   pinMode(auxPin, INPUT);
   pinMode(m0Pin, OUTPUT);
@@ -137,11 +183,12 @@ void setup()
 
   configureLoRaModule();
 
-  Serial.println("Enter command via Serial Monitor (例: s, p, l, c, n, m, q, r, etc.):");
+  Serial.println("ASCII GPS Receiver Ready - Waiting for data...");
 }
 
 void loop()
 {
+  // コンソールからのコマンド送信処理
   if (Serial.available() > 0)
   {
     String cmdStr = Serial.readStringUntil('\n');
@@ -149,146 +196,78 @@ void loop()
     if (cmdStr.length() > 0)
     {
       Serial.print("Sending command: ");
+      Serial.println(cmdStr);
+
       Addaddressandchannel();
       mySerial.write(cmdStr.c_str(), cmdStr.length());
       while (digitalRead(auxPin) == LOW)
       {
         delay(2);
       }
-      Serial.println(cmdStr);
       mySerial.flush();
       digitalWrite(ledPin, HIGH);
-      delay(200);
+      delay(50);
       digitalWrite(ledPin, LOW);
     }
   }
 
+  // LoRaモジュールからのデータ受信処理
   if (mySerial.available() > 0)
   {
-    uint8_t buffer[33]; // 最大32バイト + 1バイトRSSIの受信バッファ
-    int index = 0;
-
-    // 受信バッファからデータを取得
-    while (mySerial.available() > 0 && index < sizeof(buffer))
+    // アドレスとチャンネル情報（3バイト）読み取り
+    uint8_t addressHigh, addressLow, channel;
+    if (mySerial.available() >= 3)
     {
-      buffer[index++] = mySerial.read();
-    }
+      addressHigh = mySerial.read();
+      addressLow = mySerial.read();
+      channel = mySerial.read();
 
-    if (index < 2)
-    { // 最小データ長が2未満なら無視
-      Serial.println("[DEBUG] Received incomplete data");
-      return;
-    }
-
-    uint8_t rssi = buffer[index - 1]; // 最後の1バイトはRSSI
-    int dataLength = index - 1;       // RSSIを除いたデータ長
-
-    // 「GPS data not available」の受信処理
-    if (dataLength == 23 && memcmp(buffer, "GPS data not available", 23) == 0)
-    {
-      Serial.print("[DEBUG] Received special message: GPS data not available | RSSI: ");
-      Serial.println(rssi);
-      return;
-    }
-
-    // データの解析
-    if (dataLength == 16)
-    { // GPSデータ単体
-      double latitude, longitude;
-      memcpy(&latitude, buffer, sizeof(latitude));
-      memcpy(&longitude, buffer + sizeof(latitude), sizeof(longitude));
-
-      Serial.print("[DEBUG] Received GPS (Only): N:");
-      Serial.print(latitude, 6);
-      Serial.print(", E:");
-      Serial.print(longitude, 6);
-      Serial.print(" | RSSI: ");
-      Serial.println(rssi);
-    }
-    else if (dataLength == 29)
-    { // GPS + クォータニオンデータ
-      double latitude, longitude;
-      float altitude;
-      memcpy(&latitude, buffer, sizeof(latitude));
-      memcpy(&longitude, buffer + sizeof(latitude), sizeof(longitude));
-      memcpy(&altitude, buffer + sizeof(latitude) + sizeof(longitude), sizeof(altitude));
-
-      // クォータニオンデータ（int16_t の4つの要素を float に変換）
-      int16_t rawQuat[4];
-      memcpy(rawQuat, buffer + 20, sizeof(rawQuat));
-
-      float quaternion[4];
-      for (int i = 0; i < 4; i++)
-      {
-        quaternion[i] = rawQuat[i] / 32768.0f; // -1.0 ~ 1.0 に正規化
-      }
-
-      Serial.print("[DEBUG] Received GPS: N:");
-      Serial.print(latitude, 6);
-      Serial.print(", E:");
-      Serial.print(longitude, 6);
-      Serial.print(", Alt:");
-      Serial.print(altitude, 2);
-      Serial.print(" | Quaternion: [");
-      Serial.print(quaternion[0], 3);
-      Serial.print(", ");
-      Serial.print(quaternion[1], 3);
-      Serial.print(", ");
-      Serial.print(quaternion[2], 3);
-      Serial.print(", ");
-      Serial.print(quaternion[3], 3);
-      Serial.print("] | RSSI: ");
-      Serial.println(rssi);
-    }
-    else if (dataLength == 8)
-    { // 電圧データ（float 2つ）
-      float voltages[2];
-      memcpy(voltages, buffer, sizeof(voltages));
-      Serial.print("[DEBUG] Received Voltage1: ");
-      Serial.print(voltages[0], 2);
-      Serial.print(" V, Voltage2: ");
-      Serial.print(voltages[1], 2);
-      Serial.print(" V | RSSI: ");
-      Serial.println(rssi);
-    }
-    else if (dataLength == 5)
-    { // 各基板のステータス
-      Serial.print("[DEBUG] Received Board Statuses: ");
-      Serial.print("COM=");
-      Serial.print(static_cast<char>(buffer[0]));
-      Serial.print(" ");
-      Serial.print("PARA=");
-      Serial.print(static_cast<char>(buffer[1]));
-      Serial.print(" ");
-      Serial.print("POWER=");
-      Serial.print(static_cast<char>(buffer[2]));
-      Serial.print(" ");
-      Serial.print("GIMBAL=");
-      Serial.print(static_cast<char>(buffer[3]));
-      Serial.print(" ");
-      Serial.print("CAMERA=");
-      Serial.print(static_cast<char>(buffer[4]));
-
-      Serial.print(" | RSSI: ");
-      Serial.println(rssi);
+      Serial.printf("Address: %02X%02X, Channel: %02X\n", addressHigh, addressLow, channel);
     }
     else
     {
-      Serial.print("[DEBUG] Unknown data format (Length: ");
-      Serial.print(dataLength);
-      Serial.print(" bytes) | RSSI: ");
-      Serial.println(rssi);
-
-      // データの中身を16進数で表示
-      Serial.print("Data: ");
-      for (int i = 0; i < dataLength; i++)
-      {
-        Serial.print(buffer[i], HEX);
-        Serial.print(" ");
-      }
-      Serial.println();
+      Serial.println("Incomplete header received");
+      return;
     }
-  }
 
-  delay(1);
+    // ASCII形式のGPSデータを受信
+    char buffer[64] = {0}; // 受信バッファ
+    int index = 0;
+
+    // タイムアウト付きでASCII文字列を読み取り
+    unsigned long startTime = millis();
+    while (mySerial.available() > 0 && index < sizeof(buffer) - 1 && (millis() - startTime < 100))
+    {
+      char c = mySerial.read();
+      buffer[index++] = c;
+    }
+    buffer[index] = '\0'; // 文字列終端
+
+    // 最後の1バイトはRSSI
+    uint8_t rssi = 0;
+    if (index > 0)
+    {
+      rssi = buffer[index - 1];
+      buffer[index - 1] = '\0'; // RSSIを除外
+    }
+
+    // タイムスタンプと受信データ長を表示
+    unsigned long currentTime = millis();
+    Serial.printf("[%lu] Received %d bytes | RSSI: %d\n", currentTime, index, rssi);
+
+    // 受信したASCII文字列を表示
+    Serial.print("Raw Data: ");
+    Serial.println(buffer);
+
+    // GPSデータをデコード
+    if (index > 5)
+    { // 最低でも妥当なGPSデータとなる長さか確認
+      decodeGPSData(buffer);
+    }
+
+    // LED点滅でデータ受信を視覚的に表示
+    digitalWrite(ledPin, HIGH);
+    delay(10);
+    digitalWrite(ledPin, LOW);
+  }
 }
